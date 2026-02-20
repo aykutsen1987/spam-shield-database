@@ -1,24 +1,55 @@
 const express = require("express");
 const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
+app.use(express.json());
 
 const SOURCE_URL =
   "https://raw.githubusercontent.com/symbuzzer/Turkish-Spam-Numbers/main/SpamBlocker.csv";
 
 const MY_REPO_OWNER = "aykutsen1987";
 const MY_REPO_NAME = "spam-shield-database";
+
 const GITHUB_TOKEN = process.env.GH_TOKEN;
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+
+const CUSTOM_FILE = path.join(__dirname, "custom_numbers.json");
 
 let cachedData = [];
 let lastSyncTime = null;
 
-/**
- * GitHub backup güncelleme
- */
+/* -------------------------------------------------- */
+/* CUSTOM NUMARA DOSYA İŞLEMLERİ */
+/* -------------------------------------------------- */
+
+function loadCustomNumbers() {
+  try {
+    if (!fs.existsSync(CUSTOM_FILE)) {
+      fs.writeFileSync(CUSTOM_FILE, JSON.stringify([], null, 2));
+      return [];
+    }
+
+    const data = fs.readFileSync(CUSTOM_FILE, "utf-8");
+    return JSON.parse(data);
+  } catch (err) {
+    console.error("❌ Custom numara okuma hatası:", err.message);
+    return [];
+  }
+}
+
+function saveCustomNumbers(numbers) {
+  fs.writeFileSync(CUSTOM_FILE, JSON.stringify(numbers, null, 2));
+}
+
+/* -------------------------------------------------- */
+/* GITHUB BACKUP */
+/* -------------------------------------------------- */
+
 async function updateMyBackup(data) {
   if (!GITHUB_TOKEN) {
-    console.log("⚠️ GH_TOKEN tanımlı değil, yedekleme atlandı.");
+    console.log("⚠️ GH_TOKEN yok, yedekleme atlandı.");
     return;
   }
 
@@ -31,27 +62,22 @@ async function updateMyBackup(data) {
     let sha = "";
     let oldContent = "";
 
-    // 1️⃣ Mevcut dosyayı kontrol et
     try {
       const res = await axios.get(url, {
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-        },
+        headers: { Authorization: `token ${GITHUB_TOKEN}` },
       });
 
       sha = res.data.sha;
       oldContent = res.data.content.replace(/\n/g, "");
     } catch (e) {
-      console.log("📁 İlk kez backup.json oluşturulacak.");
+      console.log("📁 İlk backup oluşturuluyor...");
     }
 
-    // 2️⃣ Veri aynıysa tekrar yazma
     if (contentBase64 === oldContent) {
-      console.log("✅ Veri aynı, GitHub’a tekrar yazılmadı.");
+      console.log("✅ Veri aynı, tekrar yazılmadı.");
       return;
     }
 
-    // 3️⃣ GitHub’a gönder
     await axios.put(
       url,
       {
@@ -62,55 +88,52 @@ async function updateMyBackup(data) {
         sha: sha || undefined,
       },
       {
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-        },
+        headers: { Authorization: `token ${GITHUB_TOKEN}` },
       }
     );
 
-    console.log("🚀 Yeni veriler GitHub’a yedeklendi!");
+    console.log("🚀 GitHub yedek güncellendi.");
   } catch (error) {
-    console.error("❌ Yedekleme hatası:", error.message);
+    console.error("❌ GitHub yedek hatası:", error.message);
   }
 }
 
-/**
- * Kaynaktan spam numaraları çek
- */
+/* -------------------------------------------------- */
+/* VERİ SENKRON */
+/* -------------------------------------------------- */
+
 async function syncData() {
   try {
-    console.log("🔄 Veri senkronizasyonu başlatıldı...");
+    console.log("🔄 Senkron başlatıldı...");
 
-    const response = await axios.get(SOURCE_URL, {
-      timeout: 30000,
-    });
+    const response = await axios.get(SOURCE_URL, { timeout: 30000 });
 
-    const numbers = response.data
+    const remoteNumbers = response.data
       .split(/\r?\n/)
       .map((n) => n.trim())
       .filter((n) => /^\+?\d{6,}$/.test(n));
 
-    if (numbers.length > 0) {
-      cachedData = [...new Set(numbers)];
-      lastSyncTime = new Date().toISOString();
+    const customNumbers = loadCustomNumbers();
 
-      console.log(`✅ ${cachedData.length} numara yüklendi.`);
+    const merged = [...new Set([...remoteNumbers, ...customNumbers])];
 
-      await updateMyBackup(cachedData);
-    } else {
-      console.log("⚠️ Kaynaktan veri alınamadı.");
-    }
+    cachedData = merged;
+    lastSyncTime = new Date().toISOString();
+
+    console.log(`✅ Toplam ${cachedData.length} numara aktif.`);
+
+    await updateMyBackup(cachedData);
   } catch (error) {
     console.error("❌ Kaynak hatası:", error.message);
   }
 }
 
-/**
- * API endpoint
- */
+/* -------------------------------------------------- */
+/* PUBLIC API */
+/* -------------------------------------------------- */
+
 app.get("/api/check", async (req, res) => {
   try {
-    // Eğer ilk açılışta boşsa senkron başlat
     if (cachedData.length === 0) {
       await syncData();
     }
@@ -129,17 +152,56 @@ app.get("/api/check", async (req, res) => {
   }
 });
 
-/**
- * Health endpoint
- */
+/* -------------------------------------------------- */
+/* ADMIN API */
+/* -------------------------------------------------- */
+
+app.post("/api/admin/add", async (req, res) => {
+  try {
+    const token = req.headers["x-admin-token"];
+    if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+      return res.status(403).json({ success: false, message: "Yetkisiz" });
+    }
+
+    const { number } = req.body;
+
+    if (!number || !/^\+?\d{6,}$/.test(number)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Geçersiz numara" });
+    }
+
+    let customNumbers = loadCustomNumbers();
+
+    if (customNumbers.includes(number)) {
+      return res.json({ success: true, message: "Numara zaten mevcut" });
+    }
+
+    customNumbers.push(number);
+    saveCustomNumbers(customNumbers);
+
+    await syncData();
+
+    res.json({ success: true, message: "Numara eklendi" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Sunucu hatası" });
+  }
+});
+
+/* -------------------------------------------------- */
+/* HEALTH */
+/* -------------------------------------------------- */
+
 app.get("/", (req, res) => {
   res.send("🚀 CallMeta Backend Aktif.");
 });
 
+/* -------------------------------------------------- */
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`🚀 CallMeta Backend ${PORT} portunda çalışıyor.`);
+  console.log(`🚀 Backend ${PORT} portunda çalışıyor.`);
   syncData();
   setInterval(syncData, 8 * 60 * 60 * 1000);
 });
