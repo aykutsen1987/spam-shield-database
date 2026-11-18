@@ -54,9 +54,15 @@ async function updateMyBackup(data) {
   }
 
   const url = `https://api.github.com/repos/${MY_REPO_OWNER}/${MY_REPO_NAME}/contents/backup.json`;
-  const contentBase64 = Buffer.from(JSON.stringify(data, null, 2)).toString(
-    "base64"
-  );
+  // Android uygulaması (BackupResponse) bu biçimi bekler.
+  const backupObject = {
+    version: "1",
+    updatedAt: lastSyncTime,
+    numbers: data.map((n) => ({ number: n, riskLevel: "HIGH", category: "Spam" })),
+  };
+  const contentBase64 = Buffer.from(
+    JSON.stringify(backupObject, null, 2)
+  ).toString("base64");
 
   try {
     let sha = "";
@@ -81,7 +87,7 @@ async function updateMyBackup(data) {
     await axios.put(
       url,
       {
-        message: `[skip ci] Veri Güncelleme: ${new Date().toLocaleString(
+        message: `[skip ci] [skip render] Veri Güncelleme: ${new Date().toLocaleString(
           "tr-TR"
         )}`,
         content: contentBase64,
@@ -193,7 +199,7 @@ app.post("/api/admin/add", async (req, res) => {
 /* -------------------------------------------------- */
 
 app.get("/", (req, res) => {
-  res.send("🚀 CallMeta Backend Aktif.");
+  res.send("🚀 NumaraKalkan Spam Shield Backend Aktif.");
 });
 
 /* -------------------------------------------------- */
